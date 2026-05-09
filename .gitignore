@@ -1,0 +1,8 @@
+# Environment variables
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Python
+__pycache__/

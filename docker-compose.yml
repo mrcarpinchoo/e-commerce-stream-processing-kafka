@@ -1,40 +1,30 @@
-version: "3.8"
-
 services:
   # ── Zookeeper ────────────────────────────────────────────────────────────────
   zookeeper:
-    image: confluentinc/cp-zookeeper:7.6.1
+    image: wurstmeister/zookeeper:latest
     container_name: zookeeper
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
-    healthcheck:
-      test: ["CMD", "bash", "-c", "echo ruok | nc localhost 2181"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+    ports:
+      - "2181:2181"
 
   # ── Kafka ─────────────────────────────────────────────────────────────────────
   kafka:
-    image: confluentinc/cp-kafka:7.6.1
+    image: wurstmeister/kafka:latest
     container_name: kafka
     depends_on:
-      zookeeper:
-        condition: service_healthy
+      - zookeeper
     ports:
       - "9092:9092"
+    expose:
+      - "9093"
     environment:
-      KAFKA_BROKER_ID: 1
+      KAFKA_ADVERTISED_LISTENERS: INSIDE://kafka:9093,OUTSIDE://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INSIDE:PLAINTEXT,OUTSIDE:PLAINTEXT
+      KAFKA_LISTENERS: INSIDE://0.0.0.0:9093,OUTSIDE://0.0.0.0:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: INSIDE
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
-    healthcheck:
-      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
-      interval: 15s
-      timeout: 10s
-      retries: 10
+      KAFKA_CREATE_TOPICS: "ecommerce-orders:1:1"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
 
   # ── MongoDB ───────────────────────────────────────────────────────────────────
   mongo:
@@ -50,83 +40,57 @@ services:
       timeout: 5s
       retries: 5
 
-  # ── Spark Base (build only, not a running service) ────────────────────────────
-  spark-base:
-    build:
-      context: ./docker/spark-base
-    image: spark-base:3.5
-    profiles: ["build"]   # only built, never started directly
-
   # ── Spark Master ──────────────────────────────────────────────────────────────
+  # spark-base:4.0 must be built manually before running this compose file:
+  #   docker build -t spark-base:4.0 ./docker/spark-base
   spark-master:
     build:
       context: ./docker/spark-master
-    image: spark-master:3.5
+    image: spark-master:4.0
     container_name: spark-master
-    depends_on:
-      - spark-base
     ports:
-      - "9090:8080"   # Spark Master UI
-      - "7077:7077"   # Spark Master port
-    environment:
-      - SPARK_MODE=master
+      - "9090:8080" # Spark Master UI
+      - "7077:7077" # Spark Master port
     volumes:
       - ./consumer:/opt/spark/work-dir/consumer
+      - ./src:/opt/spark/work-dir/src
       - spark_logs:/opt/spark/logs
 
   # ── Spark Worker ──────────────────────────────────────────────────────────────
   spark-worker:
     build:
       context: ./docker/spark-worker
-    image: spark-worker:3.5
+    image: spark-worker:4.0
     container_name: spark-worker
     depends_on:
       - spark-master
     environment:
-      - SPARK_MODE=worker
-      - SPARK_MASTER_URL=spark://spark-master:7077
       - SPARK_WORKER_MEMORY=2G
       - SPARK_WORKER_CORES=2
+      - SPARK_MASTER=spark://spark-master:7077
     volumes:
       - ./consumer:/opt/spark/work-dir/consumer
+      - ./src:/opt/spark/work-dir/src
       - spark_logs:/opt/spark/logs
 
-  # ── Producer ──────────────────────────────────────────────────────────────────
-  producer:
-    build:
-      context: ./producer
-    container_name: producer
+  # ── Jupyter Notebook ──────────────────────────────────────────────────────────
+  # Producer runs from inside this container:
+  #   docker exec -it spark-notebook /bin/bash
+  #   python3 /opt/spark/work-dir/src/producers/producer.py --broker kafka:9093 --topic ecommerce-orders --records 5000
+  spark-notebook:
+    image: spark-base:4.0
+    container_name: spark-notebook
+    command: jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root --NotebookApp.token=''
     depends_on:
-      kafka:
-        condition: service_healthy
+      - spark-worker
+    ports:
+      - "8888:8888"
+      - "4040:4040" # Spark App UI (active while a job runs)
     env_file:
       - .env
-    environment:
-      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-
-  # ── Consumer (spark-submit) ───────────────────────────────────────────────────
-  consumer:
-    build:
-      context: ./docker/spark-master   # reuse master image
-    container_name: consumer
-    depends_on:
-      - spark-master
-      - mongo
-      kafka:
-        condition: service_healthy
-    env_file:
-      - .env
-    environment:
-      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      MONGO_URI: mongodb://mongo:27017
     volumes:
       - ./consumer:/opt/spark/work-dir/consumer
-    command: >
-      /opt/spark/bin/spark-submit
-      --master spark://spark-master:7077
-      --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.mongodb.spark:mongo-spark-connector_2.12:10.3.0
-      --conf spark.mongodb.write.connection.uri=mongodb://mongo:27017
-      /opt/spark/work-dir/consumer/consumer.py
+      - ./src:/opt/spark/work-dir/src
 
 volumes:
   mongo_data:

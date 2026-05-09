@@ -40,11 +40,14 @@ S3 (CSV files)
 
 | Component         | Technology                          |
 | ----------------- | ----------------------------------- |
-| Message broker    | Apache Kafka 7.6.1 (Confluent)      |
-| Stream processor  | Apache Spark 3.5.1 (PySpark)        |
+| Message broker    | Apache Kafka (wurstmeister)         |
+| Stream processor  | Apache Spark 4.0.1 (PySpark)        |
+| Scala version     | 2.13                                |
+| Java version      | 17                                  |
+| Notebook          | Jupyter (via spark-base image)      |
 | Database          | MongoDB 7.0                         |
-| Kafka connector   | `spark-sql-kafka-0-10_2.12:3.5.1`   |
-| MongoDB connector | `mongo-spark-connector_2.12:10.3.0` |
+| Kafka connector   | `spark-sql-kafka-0-10_2.13:4.0.0`   |
+| MongoDB connector | `mongo-spark-connector_2.13:10.3.0` |
 | Orchestration     | Docker Compose                      |
 
 ## Prerequisites
@@ -65,34 +68,40 @@ cp .env.example .env
 2. Build the Spark base image first (required by master and worker):
 
 ```bash
-docker build -t spark-base:3.5 ./docker/spark-base
+docker build -t spark-base:4.0 ./docker/spark-base
 ```
 
 3. Start the full stack:
 
 ```bash
-docker compose up --build -d zookeeper kafka mongo spark-master spark-worker
+docker compose up --build -d zookeeper kafka mongo spark-master spark-worker spark-notebook
 ```
 
-4. Wait for Kafka to be healthy (check with `docker compose ps`), then start the consumer:
+4. Open the notebook at http://localhost:8888 — `consumer/consumer.ipynb` will be available there.
+
+5. Run all cells in `consumer.ipynb` to start the streaming queries.
+
+6. In a separate terminal, shell into the notebook container and run the producer:
 
 ```bash
-docker compose up consumer
-```
+docker exec -it spark-notebook /bin/bash
 
-5. In a separate terminal, start the producer:
-
-```bash
-docker compose up producer
+python3 /opt/spark/work-dir/src/producers/producer.py \
+    --broker kafka:9093 \
+    --topic ecommerce-orders \
+    --records 100 \
+    --delay 0.2
 ```
 
 ## Monitoring
 
-| UI              | URL                                                                       |
-| --------------- | ------------------------------------------------------------------------- |
-| Spark Master    | http://localhost:9090                                                     |
-| Kafka (via CLI) | `docker exec kafka kafka-topics --bootstrap-server localhost:9092 --list` |
-| MongoDB         | `docker exec -it mongo mongosh`                                           |
+| UI               | URL                                                                       |
+| ---------------- | ------------------------------------------------------------------------- |
+| Spark Master     | http://localhost:9090                                                     |
+| Jupyter Notebook | http://localhost:8888                                                     |
+| Spark App UI     | http://localhost:4040 (only while a job is running)                       |
+| Kafka (via CLI)  | `docker exec kafka kafka-topics --bootstrap-server localhost:9092 --list` |
+| MongoDB          | `docker exec -it mongo mongosh`                                           |
 
 ## MongoDB Validation Queries
 
@@ -162,14 +171,19 @@ db.orders_raw.countDocuments();
 .
 ├── docker-compose.yml
 ├── .env.example
-├── producer/
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   └── producer.py          # S3 → Kafka
+├── src/
+│   ├── spark_utils.py              # SparkUtils helper (session creation)
+│   └── producers/
+│       └── producer.py             # CLI script: S3 → Kafka
 ├── consumer/
-│   └── consumer.py          # Kafka → PySpark → MongoDB
+│   ├── consumer.py                 # Kafka → PySpark → MongoDB (script version)
+│   └── consumer.ipynb              # Notebook version (primary)
 └── docker/
-    ├── spark-base/Dockerfile
-    ├── spark-master/Dockerfile
-    └── spark-worker/Dockerfile
+    ├── spark-base/Dockerfile       # spark:4.0.1-scala2.13-java17-ubuntu + Jupyter
+    ├── spark-master/
+    │   ├── Dockerfile
+    │   └── entrypoint.sh           # starts Master process in foreground
+    └── spark-worker/
+        ├── Dockerfile
+        └── entrypoint.sh           # starts Worker process in foreground
 ```
