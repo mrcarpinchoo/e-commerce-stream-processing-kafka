@@ -1,47 +1,34 @@
 """
 E-Commerce Kafka Producer
-=========================
-Procesamiento de Datos Masivos | ITESO
 
-Reads the e-commerce dataset from S3 (orders + order_items + products + customers),
-joins them into enriched order-item events, and sends each event as a JSON message
-to a Kafka topic with a configurable delay between records.
+Reads the e-commerce dataset from S3, joins the four tables into enriched
+order-item events, and streams each event as a JSON message to a Kafka topic.
 
 Usage (from inside the spark-notebook container):
   python3 /opt/spark/work-dir/src/producers/producer.py \\
       --broker kafka:9093 \\
       --topic ecommerce-orders \\
       --records 5000 \\
-      --delay 0.5
-
-Dependencies:
-  pip install kafka-python boto3 pandas
+      --delay 0.2
 """
 
 import argparse
 import json
-import time
+import os
 from io import StringIO
+import time
 
 import boto3
 import pandas as pd
 from kafka import KafkaProducer
 
-# ── S3 config (read from environment or hardcoded defaults) ───────────────────
-import os
-
+# S3 config
 AWS_ACCESS_KEY_ID     = os.environ.get("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY")
 AWS_SESSION_TOKEN     = os.environ.get("AWS_SESSION_TOKEN")
 AWS_REGION            = os.environ.get("AWS_REGION", "us-east-1")
 S3_BUCKET             = os.environ.get("S3_BUCKET", "pdm-project-e-commerce-dataset")
 S3_PREFIX             = os.environ.get("S3_PREFIX", "data")
-
-DELAY_MIN = 0.1   # seconds (default lower bound)
-DELAY_MAX = 0.5   # seconds (default upper bound)
-
-
-# ── S3 helpers ────────────────────────────────────────────────────────────────
 
 def s3_client():
     return boto3.client(
@@ -52,9 +39,14 @@ def s3_client():
         aws_session_token=AWS_SESSION_TOKEN,
     )
 
+def load_table(client, table_name: str, max_files: int = 1) -> pd.DataFrame:
+    """Load CSV part-files for a table from S3.
 
-def load_table(client, table_name: str) -> pd.DataFrame:
-    """Load all CSV part-files for a table from S3 into a single DataFrame."""
+    Args:
+        client: boto3 S3 client
+        table_name: name of the table (subfolder in S3)
+        max_files: max number of part-files to read (default: 1)
+    """
     prefix = f"{S3_PREFIX}/{table_name}/"
     paginator = client.get_paginator("list_objects_v2")
     keys = [
@@ -66,18 +58,16 @@ def load_table(client, table_name: str) -> pd.DataFrame:
     if not keys:
         raise FileNotFoundError(f"No CSV files found at s3://{S3_BUCKET}/{prefix}")
 
+    keys = sorted(keys)[:max_files]
     frames = []
-    for key in sorted(keys):
+    for key in keys:
         print(f"  Reading s3://{S3_BUCKET}/{key}")
         body = client.get_object(Bucket=S3_BUCKET, Key=key)["Body"].read().decode("utf-8")
         frames.append(pd.read_csv(StringIO(body)))
 
     df = pd.concat(frames, ignore_index=True)
-    print(f"  Loaded '{table_name}': {len(df):,} rows")
+    print(f"  Loaded '{table_name}': {len(df):,} rows (from {len(keys)} file(s))")
     return df
-
-
-# ── Producer ──────────────────────────────────────────────────────────────────
 
 def build_enriched_dataset(client) -> pd.DataFrame:
     """Join the four tables into enriched order-item events."""
@@ -105,15 +95,14 @@ def build_enriched_dataset(client) -> pd.DataFrame:
         )
     )
     enriched.rename(columns={"price": "product_price", "name": "customer_name"}, inplace=True)
+    enriched.dropna(subset=["order_date", "order_id", "order_item_id"], inplace=True)
     print(f"  Enriched dataset: {len(enriched):,} rows\n")
     return enriched
-
 
 def run_producer(args):
     client   = s3_client()
     enriched = build_enriched_dataset(client)
 
-    # Sample the requested number of records (reproducible)
     n_records = args.records if args.records > 0 else len(enriched)
     sample = enriched.sample(n=min(n_records, len(enriched)), random_state=42).reset_index(drop=True)
 
@@ -133,57 +122,31 @@ def run_producer(args):
         for idx, row in sample.iterrows():
             producer.send(args.topic, value=row.to_dict())
             producer.flush()
-
             print(f"[{idx + 1}] Sent order_item_id={row.get('order_item_id', '?')}  "
                   f"product={row.get('product_name', '?')}  "
                   f"category={row.get('category', '?')}")
-
             if args.delay > 0:
                 time.sleep(args.delay)
-
     except KeyboardInterrupt:
         print("\nStopped by user.")
     finally:
         producer.close()
         print(f"\nDone. Total records sent: {idx + 1}")
 
-
-# ── CLI ───────────────────────────────────────────────────────────────────────
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Stream enriched e-commerce order-item events to a Kafka topic."
     )
-    parser.add_argument(
-        "--broker",
-        default="kafka:9093",
-        help="Kafka broker address (default: kafka:9093).",
-    )
-    parser.add_argument(
-        "--topic",
-        default="ecommerce-orders",
-        help="Kafka topic name (default: ecommerce-orders).",
-    )
-    parser.add_argument(
-        "--records",
-        type=int,
-        default=5000,
-        help="Number of records to send. 0 means send all (default: 5000).",
-    )
-    parser.add_argument(
-        "--delay",
-        type=float,
-        default=0.2,
-        help="Seconds to wait between records (default: 0.2).",
-    )
+    parser.add_argument("--broker",   default="kafka:9093",        help="Kafka broker address.")
+    parser.add_argument("--topic",    default="ecommerce-orders",  help="Kafka topic name.")
+    parser.add_argument("--records",  type=int,   default=5000,    help="Number of records to send (0 = all).")
+    parser.add_argument("--delay",    type=float, default=0.2,     help="Seconds between records.")
     return parser
-
 
 def main():
     parser = build_parser()
     args   = parser.parse_args()
     run_producer(args)
-
 
 if __name__ == "__main__":
     main()
