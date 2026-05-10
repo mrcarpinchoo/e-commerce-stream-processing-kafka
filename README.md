@@ -1,6 +1,6 @@
-# E-Commerce Structured Streaming — Part II
+# E-Commerce Stream Processing with Kafka
 
-Kafka → PySpark Structured Streaming → MongoDB pipeline for the Big Data Engineering final project.
+Kafka -> PySpark Structured Streaming -> MongoDB pipeline for the Big Data Engineering final project.
 
 ## Architecture
 
@@ -47,7 +47,7 @@ S3 (CSV files)
 | Notebook          | Jupyter (via spark-base image)      |
 | Database          | MongoDB 7.0                         |
 | Kafka connector   | `spark-sql-kafka-0-10_2.13:4.0.0`   |
-| MongoDB connector | `mongo-spark-connector_2.13:10.3.0` |
+| MongoDB connector | `mongo-spark-connector_2.13:10.5.0` |
 | Orchestration     | Docker Compose                      |
 
 ## Prerequisites
@@ -60,38 +60,37 @@ S3 (CSV files)
 
 1. Copy the environment file and fill in your credentials:
 
-```bash
-cp .env.example .env
-# edit .env with your AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
-```
+    ```bash
+    cp .env.example .env
+    ```
 
 2. Build the Spark base image first (required by master and worker):
 
-```bash
-docker build -t spark-base:4.0 ./docker/spark-base
-```
+    ```bash
+    docker build -t spark-base:4.0 ./docker/spark-base
+    ```
 
 3. Start the full stack:
 
-```bash
-docker compose up --build -d zookeeper kafka mongo spark-master spark-worker spark-notebook
-```
+    ```bash
+    docker compose up --build -d zookeeper kafka mongo spark-master spark-worker spark-notebook
+    ```
 
-4. Open the notebook at http://localhost:8888 — `consumer/consumer.ipynb` will be available there.
+4. Open the notebook at http://localhost:8888, `notebooks/consumer.ipynb` will be available there.
 
 5. Run all cells in `consumer.ipynb` to start the streaming queries.
 
 6. In a separate terminal, shell into the notebook container and run the producer:
 
-```bash
-docker exec -it spark-notebook /bin/bash
+    ```bash
+    docker exec -it spark-notebook /bin/bash
 
-python3 /opt/spark/work-dir/src/producers/producer.py \
-    --broker kafka:9093 \
-    --topic ecommerce-orders \
-    --records 100 \
-    --delay 0.2
-```
+    python3 /opt/spark/work-dir/src/producers/producer.py \
+      --broker kafka:9093 \
+      --topic ecommerce-orders \
+      --records 100 \
+      --delay 0.2
+    ```
 
 ## Monitoring
 
@@ -165,25 +164,36 @@ db.orders_raw.findOne();
 db.orders_raw.countDocuments();
 ```
 
+### Drop all collections (clean re-run)
+
+```bash
+docker exec -it mongo mongosh ecommerce --eval "
+  db.orders_raw.drop();
+  db.revenue_by_category.drop();
+  db.orders_by_country.drop();
+  db.payment_method_stats.drop();
+  print('All collections dropped.');
+"
+```
+
 ## Project Structure
 
 ```
 .
 ├── docker-compose.yml
 ├── .env.example
+├── notebooks/
+│   └── consumer.ipynb        # Streaming consumer (run in Jupyter)
 ├── src/
-│   ├── spark_utils.py              # SparkUtils helper (session creation)
+│   ├── SparkUtils.py          # SparkUtils helper (session creation)
 │   └── producers/
-│       └── producer.py             # CLI script: S3 → Kafka
-├── consumer/
-│   ├── consumer.py                 # Kafka → PySpark → MongoDB (script version)
-│   └── consumer.ipynb              # Notebook version (primary)
+│       └── producer.py        # CLI script: S3 → Kafka
 └── docker/
     ├── spark-base/Dockerfile       # spark:4.0.1-scala2.13-java17-ubuntu + Jupyter
     ├── spark-master/
     │   ├── Dockerfile
-    │   └── entrypoint.sh           # starts Master process in foreground
+    │   └── entrypoint.sh
     └── spark-worker/
         ├── Dockerfile
-        └── entrypoint.sh           # starts Worker process in foreground
+        └── entrypoint.sh
 ```
